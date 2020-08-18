@@ -5,6 +5,7 @@ import os
 import grequests
 from pydub import AudioSegment
 
+# TODO split all the parts into chunks instead of all of them
 urls = [
 	{
 		'url': 'http://10.0.0.247:5002/api/tts?text={}',
@@ -24,15 +25,15 @@ urls = [
 	}
 ]
 
-
+requests_timeout = 300
 completed_urls = []
 
-text = '''
-It was so beautiful out on the country! it was summer- the wheat fields were golden, the oats were green, and down
-among the green meadows the hay was stacked. There the stork minced about on his red legs, clacking away in Egyptian,
-which was the language his mother had taught him. Round about the field and meadow lands rose vast forests,
-in which deep lakes lay hidden.
-'''
+# text = '''
+# It was so beautiful out on the country! it was summer- the wheat fields were golden, the oats were green, and down
+# among the green meadows the hay was stacked. There the stork minced about on his red legs, clacking away in Egyptian,
+# which was the language his mother had taught him. Round about the field and meadow lands rose vast forests,
+# in which deep lakes lay hidden.
+# '''
 
 
 def _to_url_format(sentences):
@@ -89,77 +90,77 @@ def combine_audio_files(file_locations, finished_file_name):
 		else:
 			sounds = sounds + AudioSegment.from_file(file)
 		os.remove(file)
-
-	sounds.export('./output/' + finished_file_name+'.wav', format='wav')
-
-
-def _fix_broken_urls_helper(broken_urls):
-	if len(urls) == 0:
-		# No working urls please check server
-		raise Exception()
-	if len(broken_urls) == 0:
-		return
-	temp = []
-	for i in range(len(broken_urls)):
-		if broken_urls[i].status_code != 200:
-			for url in urls:
-				if url['url'][:-2] in broken_urls[i].url:
-					urls.remove(url)
-					break
-			temp.append(broken_urls[i].url.split('=')[1])
-	redo_urls = []
-	if len(temp) != 0:
-		for i in range(len(temp)):
-			redo_urls.append(urls[i % len(urls)]['url'].format(temp[i]))
-
-	rs = [grequests.get(u, timeout=300) for u in redo_urls]
-	t = grequests.map(rs, size=len(urls))
-	fix_broken_urls(t)
+	if sounds is not None:
+		sounds.export('./output/' + finished_file_name+'.wav', format='wav')
+	else:
+		print('Could not export sounds, it is None')
 
 
-def fix_broken_urls(t):
-	broken_urls = []
-	for i in range(len(t)):
-		if t[i].status_code != 200:
-			for url in urls:
-				if url['url'][:-2] in t[i].url:
-					urls.remove(url)
-					break
-			broken_urls.append(t[i].url.split('=')[1])
-	if len(broken_urls) != 0:
-		_fix_broken_urls_helper(broken_urls)
+def fix_broken_urls(requests):
+	broken_translated_urls = []
+	broken_server_url = []
+	for i in range(len(requests)):
+		if requests[i]['request'] is not None:
+			if requests[i]['request'].status_code != 200:
+				broken_translated_urls.append(requests[i]['request'].url.split('=')[1])
+				broken_server_url.append(requests[i]['request'].url.split('=')[0]+'={}')
+		else:
+			broken_translated_urls.append(requests[i]['url'].split('=')[1])
+			broken_server_url.append(requests[i]['url'].split('=')[0]+'={}')
+
+	while len(broken_server_url) != 0:
+		if len(broken_translated_urls) != 0:
+			print('found broken urls:')
+			print(broken_server_url)
+			print(broken_translated_urls)
+
+			reboot_server_ips = []
+			for i in range(len(broken_server_url)):
+				for x in range(len(urls)):
+					if broken_server_url[i] == urls[x]['url']:
+						if urls[x]['reboot_url'] not in reboot_server_ips:
+							reboot_server_ips.append(urls[x]['reboot_url'])
+						break
+			# if there is broken servers then you will want to ping the restart script on all servers then wait 1 minute
+			print('pinging: {}'.format(reboot_server_ips))
+			rs = (grequests.get(u, timeout=requests_timeout) for u in reboot_server_ips)
+			grequests.map(rs)
+			time.sleep(60)
+
+			redo_urls = []
+			# after that re assign the urls to re-balance them
+			for i in range(len(broken_translated_urls)):
+				redo_urls.append(urls[i % len(urls)]['url'].format(broken_translated_urls))
+
+			# then request all of them again
+			rs = [grequests.get(u, timeout=requests_timeout) for u in redo_urls]
+			r = grequests.map(rs, size=len(urls))
+
+			for i in range(len(requests)):
+				if requests[i]['request'] is not None:
+					if requests[i]['request'].status_code == 200:
+						# this was a valid submission
+						continue
+
+				for x in range(len(redo_urls)):
+					# check which spot it goes into and replace it
+					if requests[i]['url'].split('=')[1] == redo_urls[x].split('=')[1]:
+						requests[i]['request'] = r[x]
+
+			# repeat until there are no more broken requests
+			broken_translated_urls = []
+			broken_server_url = []
+			for i in range(len(requests)):
+				if requests[i]['request'] is not None:
+					if requests[i]['request'].status_code != 200:
+						broken_translated_urls.append(requests[i]['request'].url.split('=')[1])
+						broken_server_url.append(requests[i]['request'].url.split('=')[0] + '={}')
+				else:
+					broken_translated_urls.append(requests[i]['url'].split('=')[1])
+					broken_server_url.append(requests[i]['url'].split('=')[0] + '={}')
 
 
-def main(finished_file_name):
-	# current best 401 sec
-	# 139.4 sec best
-	# currently 201.28 sec
-	# text = get_text_from_file('./BeeMovieScript')
-
-	setup_urls(text)
-	rs = [grequests.get(u, timeout=300) for u in completed_urls]
-	t = grequests.map(rs, size=len(urls))
-	requests = []
-	for i in range(len(t)):
-		requests.append({'request': t[i], 'position': i, 'url': completed_urls[i]})
-	print(completed_urls)
-	print(requests)
-
-	# fix_broken_urls(t)
-
-	# broken_urls = []
-	# for i in range(len(t)):
-	# 	if t[i].status_code != 200:
-	# 		for url in urls:
-	# 			if url[:-2] in t[i].url:
-	# 				urls.remove(url)
-	# 				break
-	# 		broken_urls.append(t[i].url.split('=')[1])
-	# redo_urls = []
-	# if len(broken_urls) != 0:
-	# 	for i in range(len(broken_urls)):
-	# 		redo_urls.append(urls[i % len(urls)].format(broken_urls[i]))
-
+def save_tts_files(requests):
 	completed_files = []
 	for i in range(len(requests)):
 		if requests[i]['request'] is not None:
@@ -169,7 +170,28 @@ def main(finished_file_name):
 			completed_files.append(file_location)
 		else:
 			print('skipping {}.wav; found None object'.format(i))
+	return completed_files
 
+
+def main(finished_file_name):
+	# current best 401 sec
+	# 139.4 sec best
+	# currently 201.28 sec
+	text = get_text_from_file('./input/BeeMovieScript')
+
+	setup_urls(text)
+	rs = [grequests.get(u, timeout=requests_timeout) for u in completed_urls]
+	t = grequests.map(rs, size=len(urls))
+	requests = []
+	for i in range(len(t)):
+		requests.append({'request': t[i], 'position': i, 'url': completed_urls[i]})
+	print(completed_urls)
+	print(requests)
+
+	fix_broken_urls(requests)
+
+	completed_files = save_tts_files(requests)
+	completed_files.sort()
 	combine_audio_files(completed_files, finished_file_name)
 
 
