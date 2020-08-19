@@ -5,7 +5,6 @@ import os
 import grequests
 from pydub import AudioSegment
 
-# TODO split all the parts into chunks instead of all of them
 urls = [
 	{
 		'url': 'http://10.0.0.247:5002/api/tts?text={}',
@@ -25,7 +24,9 @@ urls = [
 	}
 ]
 
+# TODO increase this when timeouts repeatly occure incase if a sentence is to long
 requests_timeout = 300
+ping_rest_time = 45
 completed_urls = []
 
 # text = '''
@@ -47,13 +48,35 @@ def _filter_sentences(sentences):
 	for i in range(len(sentences)):
 		if '\n' in sentences[i]:
 			sentences[i] = sentences[i].replace('\n', '')
-		sanitized_sentences.append(sentences[i])
+		if '...' in sentences[i]:
+			sentences[i] = sentences[i].replace('...', '.')
+		if ':' in sentences[i]:
+			sentences[i] = sentences[i].replace(':', ' ')
+		cutoff_point = 0
+		for x in range(len(sentences[i])):
+			if '.' == sentences[i][x]:
+				cutoff_point += 1
+			elif ' ' == sentences[i][x]:
+				cutoff_point += 1
+			elif '!' == sentences[i][x]:
+				cutoff_point += 1
+			elif '?' == sentences[i][x]:
+				cutoff_point += 1
+			elif '-' == sentences[i][x]:
+				cutoff_point += 1
+			elif ':' == sentences[i][x]:
+				cutoff_point += 1
+			else:
+				break
+		sentences[i] = sentences[i][cutoff_point:]
+		if len(sentences[i]) > 0:
+			sanitized_sentences.append(sentences[i])
 	return sanitized_sentences
 
 
 def get_sentences(original_text):
-	# make sure to add ? to the regular expression
-	temp = re.split(r'(?<=\.|!) ', original_text)
+	# temp = re.split(r'(?<=\.|!) ', original_text)
+	temp = re.split(r'(?<=[.!?]).', original_text)
 	temp = _filter_sentences(temp)
 	temp = _to_url_format(temp)
 	temp1 = []
@@ -99,6 +122,7 @@ def combine_audio_files(file_locations, finished_file_name):
 def fix_broken_urls(requests):
 	broken_translated_urls = []
 	broken_server_url = []
+	repeated_requests_timeout = requests_timeout
 	for i in range(len(requests)):
 		if requests[i]['request'] is not None:
 			if requests[i]['request'].status_code != 200:
@@ -125,15 +149,16 @@ def fix_broken_urls(requests):
 			print('pinging: {}'.format(reboot_server_ips))
 			rs = (grequests.get(u, timeout=requests_timeout) for u in reboot_server_ips)
 			grequests.map(rs)
-			time.sleep(60)
+			time.sleep(ping_rest_time)
 
 			redo_urls = []
 			# after that re assign the urls to re-balance them
 			for i in range(len(broken_translated_urls)):
-				redo_urls.append(urls[i % len(urls)]['url'].format(broken_translated_urls))
-
+				redo_urls.append(urls[i % len(urls)]['url'].format(broken_translated_urls[i]))
+			print('Redoing URLS:')
+			print(redo_urls)
 			# then request all of them again
-			rs = [grequests.get(u, timeout=requests_timeout) for u in redo_urls]
+			rs = [grequests.get(u, timeout=repeated_requests_timeout) for u in redo_urls]
 			r = grequests.map(rs, size=len(urls))
 
 			for i in range(len(requests)):
@@ -141,6 +166,9 @@ def fix_broken_urls(requests):
 					if requests[i]['request'].status_code == 200:
 						# this was a valid submission
 						continue
+				else:
+					# if there was a timeout increase the timeout time by 1 minute
+					repeated_requests_timeout += 60
 
 				for x in range(len(redo_urls)):
 					# check which spot it goes into and replace it
@@ -158,18 +186,22 @@ def fix_broken_urls(requests):
 				else:
 					broken_translated_urls.append(requests[i]['url'].split('=')[1])
 					broken_server_url.append(requests[i]['url'].split('=')[0] + '={}')
+			print(requests)
+	return requests
 
 
 def save_tts_files(requests):
 	completed_files = []
+	print('saving: {}'.format(requests))
 	for i in range(len(requests)):
+
 		if requests[i]['request'] is not None:
 			data = requests[i]['request'].content
-			file_location = '{}'.format(i)
+			file_location = '{}'.format(requests[i]['position'])
 			save_file(data, file_location)
 			completed_files.append(file_location)
 		else:
-			print('skipping {}.wav; found None object'.format(i))
+			print('skipping {} file; found None object'.format(i))
 	return completed_files
 
 
@@ -177,26 +209,43 @@ def main(finished_file_name):
 	# current best 401 sec
 	# 139.4 sec best
 	# currently 201.28 sec
+	completed_requests = []
 	text = get_text_from_file('./input/BeeMovieScript')
 
 	setup_urls(text)
 	rs = [grequests.get(u, timeout=requests_timeout) for u in completed_urls]
-	t = grequests.map(rs, size=len(urls))
+	chunk_number = 0
+	while chunk_number*len(urls) < len(rs):
+		max_number = min(len(urls), len(rs))
+		chunk = rs[chunk_number*len(urls): max_number + max_number * chunk_number]
+		t = grequests.map(chunk, size=len(urls))
+		requests = []
+		for i in range(len(t)):
+			requests.append(
+				{
+					'request': t[i],
+					'position': i + chunk_number * len(urls),
+					'url': completed_urls[i + chunk_number * len(urls)]
+				})
+		print(completed_urls)
+		print(requests)
+
+		requests = fix_broken_urls(requests)
+		completed_requests.append(requests)
+		chunk_number += 1
 	requests = []
-	for i in range(len(t)):
-		requests.append({'request': t[i], 'position': i, 'url': completed_urls[i]})
-	print(completed_urls)
+	for i in range(len(completed_requests)):
+		for x in range(len(completed_requests[i])):
+			requests.append(completed_requests[i][x])
 	print(requests)
+	completed_files = (save_tts_files(requests))
 
-	fix_broken_urls(requests)
-
-	completed_files = save_tts_files(requests)
 	completed_files.sort()
 	combine_audio_files(completed_files, finished_file_name)
 
 
 start_time = time.time()
-audio_file_name = 'temp'
+audio_file_name = 'BeeMovieScript'
 main(audio_file_name)
 
 print('total time = {}'.format(str(time.time() - start_time)))
