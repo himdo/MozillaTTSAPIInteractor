@@ -4,6 +4,8 @@ import time
 import os
 import grequests
 from pydub import AudioSegment
+import pickle
+import request_object
 
 urls = [
 	{
@@ -215,15 +217,32 @@ def main(finished_file_name):
 	setup_urls(text)
 	rs = [grequests.get(u, timeout=requests_timeout) for u in completed_urls]
 	chunk_number = 0
+
+	path = './output/{}.dump'.format(finished_file_name)
+	if os.path.exists(path) and os.path.isfile(path):
+		pickled_data = None
+		with open(path, 'rb') as pickle_file:
+			pickled_data = pickle.load(pickle_file)
+		if pickled_data is not None:
+			if pickled_data['sentenceNum'] == len(completed_urls):
+				completed_requests = pickled_data['requests']
+				chunk_number = len(completed_requests)
+				# TODO add some logic to check the processing url count and dynamically move the chunk number while minimizing
+				# the amount of lost requests
+				print('valid backup found skipping to chunk: {}'.format(chunk_number))
+
 	while chunk_number*len(urls) < len(rs):
 		max_number = min(len(urls), len(rs))
 		chunk = rs[chunk_number*len(urls): max_number + max_number * chunk_number]
 		t = grequests.map(chunk, size=len(urls))
 		requests = []
 		for i in range(len(t)):
+			new_request = None
+			if t[i] is not None:
+				new_request = request_object.requestObject(t[i].url, t[i].status_code, t[i].content)
 			requests.append(
 				{
-					'request': t[i],
+					'request': new_request,
 					'position': i + chunk_number * len(urls),
 					'url': completed_urls[i + chunk_number * len(urls)]
 				})
@@ -232,6 +251,10 @@ def main(finished_file_name):
 
 		requests = fix_broken_urls(requests)
 		completed_requests.append(requests)
+		pickle_object = {'sentenceNum': len(completed_urls), 'requests': completed_requests}
+		with open('./output/{}.dump'.format(finished_file_name), 'wb') as file:
+			print('Saving serializable data')
+			pickle.dump(pickle_object, file)
 		chunk_number += 1
 	requests = []
 	for i in range(len(completed_requests)):
