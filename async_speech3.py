@@ -263,7 +263,6 @@ def main(finished_file_name):
 	print(requests)
 	completed_files = (save_tts_files(requests))
 
-	completed_files.sort()
 	combine_audio_files(completed_files, finished_file_name)
 
 
